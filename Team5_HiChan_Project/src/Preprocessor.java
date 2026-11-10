@@ -285,7 +285,7 @@ public class Preprocessor {
 
         for (RoadFeature feature : features) { // for each feature
             // if its in the states we want
-            if(feature.route == HiChanConfig.HIGHWAY && feature.stfips == HiChanConfig.STATE_WA || feature.stfips == HiChanConfig.STATE_ID)
+            if(HiChanConfig.HIGHWAY.equals(feature.route) && (HiChanConfig.STATE_WA.equals(feature.stfips) || HiChanConfig.STATE_ID.equals(feature.stfips)))
                 kept.add(feature); // add the feature
             else
                 System.out.println("Skipped: "  + feature); // what was skipped
