@@ -8,6 +8,9 @@ package Hi_Chan;
  *
  * Hi_Chan.HiChan fills in the extra fields (geohash, matched segment, channelId)
  * while it processes the log.
+ *
+ * A GpsRecord is also used for BAD lines: if a line can't be parsed, HiChan keeps it in
+ * the list with errorText set, so the output file has the same lines in the same order.
  */
 public class GpsRecord {
 
@@ -15,7 +18,7 @@ public class GpsRecord {
     // append the Channel ID as the last field (that's what the spec asks for).
     private String originalLine;
 
-    // Important Data
+    // Important Data: the six values parsed from the line
     private String dateTime;
     private double latitude;
     private double longitude;
@@ -23,68 +26,138 @@ public class GpsRecord {
     private double speed;
     private int satUsed;
 
-    // INIT
+    // INIT: these start out null and are filled in later by HiChan
     private String geohash;            // precision-5 geohash of this point
     private HighwaySegment segment;    // nearest highway point, or null if no match
     private String channelId;          // e.g. "#I90WAEB_290" or "#I90WA??_290", null until built
     private String errorText;          // why the line was skipped (FR-14), or null
 
 
-    /* Constructor
-     * What it does: stores the parsed values and the original text line.
-     *
-     * How to code it:
-     *   1. Assign each parameter to its field.
-     *   2. Leave geohash, segment, and channelId null for now.
-     */
+    // Constructor: stores the parsed values and the original text line.
+    // geohash, segment, channelId and errorText are left null on purpose;
+    // HiChan sets them later as it works through the log.
     public GpsRecord(String originalLine, String dateTime, double latitude, double longitude,
                      double altitude, double speed, int satUsed) {
-        // TODO: assign fields
+        // copy each parameter into the matching field (this.x is the field, x is the parameter)
+        this.originalLine = originalLine; // the raw text, kept for the output file
+        this.dateTime = dateTime;
+        this.latitude = latitude;
+        this.longitude = longitude;
+        this.altitude = altitude;
+        this.speed = speed;
+        this.satUsed = satUsed;
+
+        // geohash, segment, channelId and errorText are not assigned here,
+        // so Java leaves them null until HiChan sets them
     } // end of Hi_Chan.GpsRecord
 
     /*
-     * What it does: parses one data line of the GPS log into a Hi_Chan.GpsRecord.
+     * Parses one data line of the GPS log into a GpsRecord.
+     * (The caller, HiChan.readGpsLog, skips the header line, so this only gets data lines.)
      *
-     * How to code it:
-     *   1. Drop a trailing "\r" so CRLF and LF files both work (NFR-D1).
-     *   2. split(",", -1) must give exactly 6 parts:
-     *        [0] date time  [1] latitude  [2] longitude
-     *        [3] altitude   [4] speed     [5] sat_used
-     *   3. trim() each part, Double.parseDouble() parts 1-4 and Integer.parseInt() part 5.
-     *   4. If anything is wrong (null line, wrong field count, empty date time, a value
-     *      that isn't a number, latitude outside -90..90, longitude outside -180..180),
-     *      throw IllegalArgumentException with a short reason that has NO commas,
-     *      e.g. "expected 6 fields but found 5". readGpsLog writes that reason after
-     *      SKIPPED-Error: (FR-14).
-     *   5. return new Hi_Chan.GpsRecord(line without "\r", parts[0], ...).
-     *   NOTE: the caller (Hi_Chan.HiChan.readGpsLog) skips the header line, so this
-     *   method only ever gets data lines.
+     * If anything is wrong with the line, it throws IllegalArgumentException with a short
+     * reason that has NO commas. readGpsLog catches it and writes that reason after
+     * SKIPPED-Error: in the output (FR-14). The reason can't contain a comma because that
+     * would add an extra field to the output CSV line.
      */
     public static GpsRecord fromCsvLine(String line) {
-        // TODO: parse a GPS log line
-        return null;
+        // a null line can't be split, so say so clearly instead of crashing
+        if (line == null)
+            throw new IllegalArgumentException("line is null");
+
+        // drop a trailing "\r" so Windows (CRLF) and Unix (LF) files both work (NFR-D1)
+        if (line.endsWith("\r"))
+            line = line.substring(0, line.length() - 1);
+
+        // split into fields. The -1 keeps empty trailing fields,
+        // so a line ending in a comma is counted as having an extra empty field.
+        String[] parts = line.split(",", -1);
+
+        // a good line has exactly 6 fields: date time, latitude, longitude,
+        // altitude, speed, sat_used. Any other count is a bad line.
+        if (parts.length != 6)
+            throw new IllegalArgumentException("expected 6 fields but found " + parts.length);
+
+        // field 0, the timestamp. It stays as text, but it can't be blank.
+        String dateTime = parts[0].trim();
+        if (dateTime.isEmpty())
+            throw new IllegalArgumentException("date time is empty");
+
+        // fields 1-4 are decimal numbers; parseNumber trims them and
+        // throws a short reason naming the field if one isn't a number
+        double latitude = parseNumber(parts[1], "latitude");
+        double longitude = parseNumber(parts[2], "longitude");
+        double altitude = parseNumber(parts[3], "altitude");
+        double speed = parseNumber(parts[4], "speed");
+
+        // field 5 must be a WHOLE number, so a value like "2.5" is rejected
+        int satUsed;
+        try {
+            satUsed = Integer.parseInt(parts[5].trim());
+        } catch (NumberFormatException e) {
+            // we write our own message because Java's message may contain characters we don't want
+            throw new IllegalArgumentException("sat_used is not a whole number");
+        }
+
+        // the coordinates must be real places on Earth
+        if (latitude < -90 || latitude > 90)
+            throw new IllegalArgumentException("latitude out of range");
+        if (longitude < -180 || longitude > 180)
+            throw new IllegalArgumentException("longitude out of range");
+
+        // everything checked out. Build the record, keeping the line
+        // (without the \r) so the output can copy it exactly.
+        return new GpsRecord(line, dateTime, latitude, longitude, altitude, speed, satUsed);
     } // end of fromCsvLine
 
+    // Helper for fromCsvLine: parses a number or throws a short reason naming the field.
+    // Double.parseDouble also accepts "NaN" and "Infinity", which are not real
+    // coordinates or readings, so those are rejected too.
+    private static double parseNumber(String text, String fieldName) {
+        // try to read the text as a number (trim first so " 47.5 " works)
+        double value;
+        try {
+            value = Double.parseDouble(text.trim());
+        } catch (NumberFormatException e) {
+            // empty text, letters, etc.: report which field was wrong
+            throw new IllegalArgumentException(fieldName + " is not a number");
+        }
+
+        // "NaN" and "Infinity" parse successfully but aren't real values, so reject them
+        if (Double.isNaN(value) || Double.isInfinite(value))
+            throw new IllegalArgumentException(fieldName + " is not a number");
+
+        // a good, finite number
+        return value;
+    } // end of parseNumber
+
     /*
-     * What it does: returns true if this point and `other` are (practically)
-     * the same spot, meaning the truck isn't moving. The spec says to reuse
-     * the prior Channel ID in that case.
+     * Returns true if this point and `other` are practically the same spot, meaning the
+     * truck isn't moving. The spec says to reuse the prior Channel ID in that case (FR-11).
      *
-     * How to code it:
-     *   1. If other is null, or either record has errorText set, return false.
-     *   2. Compare latitude and longitude with HiChanConfig.SAME_LOCATION_TOLERANCE
-     *      instead of ==, e.g. Math.abs(lat1 - lat2) < 0.00001 (about 1 meter). GPS jitters.
+     * GPS "jitters" by a tiny amount even when parked, so == on doubles would almost never
+     * match. Instead we allow a difference smaller than SAME_LOCATION_TOLERANCE (0.00001
+     * degrees, about 1 meter) in both latitude and longitude.
      */
     public boolean isSameLocation(GpsRecord other) {
-        // TODO: compare coordinates with a tolerance
-        return false;
+        // a missing record, or a skipped (bad) line on either side, is never "the same spot".
+        // A bad line has no real coordinates to compare.
+        if (other == null || errorText != null || other.errorText != null)
+            return false;
+
+        // compare latitude AND longitude with a tolerance instead of ==.
+        // Both differences must be smaller than the tolerance for the points to match.
+        return Math.abs(latitude - other.latitude) < HiChanConfig.SAME_LOCATION_TOLERANCE
+                && Math.abs(longitude - other.longitude) < HiChanConfig.SAME_LOCATION_TOLERANCE;
     } // end of isSameLocation
 
     // the line written to the output file: the original line plus the Channel ID
     // as the last field (FR-12), or SKIPPED-Error:<reason> for a bad line (FR-14)
     public String toOutputLine() {
+        // a bad line: keep its text and mark it as skipped, with the reason
         if (errorText != null)
             return originalLine + ",SKIPPED-Error:" + errorText;
+        // a good line: original text + one more field; if no Channel ID was set, that field is empty
         return originalLine + "," + (channelId == null ? "" : channelId);
     } // end of toOutputLine
 
