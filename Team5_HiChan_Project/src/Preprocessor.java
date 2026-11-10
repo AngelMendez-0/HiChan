@@ -6,11 +6,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.NoSuchFileException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.Comparator;
 import java.io.FileWriter;
 import java.io.PrintWriter;
 
@@ -280,48 +278,120 @@ public class Preprocessor {
         return features; // yipee
     } // end of parseFeatures
 
-    /*
-     * Segment Filter (FR-02)
-     * What it does: keeps only features on I-90 in Washington or Idaho and prints a
-     * skip report line for every other feature.
-     *
-     * How to code it:
-     *   1. List<RoadFeature> kept = new ArrayList<>();
-     *   2. For each feature f:
-     *        if f.route equals HiChanConfig.HIGHWAY and f.stfips equals
-     *        HiChanConfig.STATE_WA or HiChanConfig.STATE_ID -> kept.add(f)
-     *        else -> System.out.println("Skipped: " + f);
-     *   3. return kept;  (same order as the input)
-     */
+
+    // Keeps only features on I-90 in Washingto nor Idaho and prints what we skip
     public static List<RoadFeature> filterSegments(List<RoadFeature> features) {
-        // TODO: keep I-90 WA/ID features, report the rest
-        return new ArrayList<>();
+        List<RoadFeature> kept = new ArrayList<>(); // create new list
+
+        for (RoadFeature feature : features) { // for each feature
+            // if its in the states we want
+            if(feature.route == HiChanConfig.HIGHWAY && feature.stfips == HiChanConfig.STATE_WA || feature.stfips == HiChanConfig.STATE_ID)
+                kept.add(feature); // add the feature
+            else
+                System.out.println("Skipped: "  + feature); // what was skipped
+
+        } // end of for
+
+        return kept; // yipee
     } // end of filterSegments
 
-    /*
-     * Segment Splitter (FR-07, AD-4)
-     * What it does: makes one HighwaySegment row per highway point (geohash left null)
-     * and gives each point its 10-mile channel.
-     *
-     * How to code it:
-     *   1. Group the features that share route, STFIPS, BEGMP and ENDMP (NHPN splits one
-     *      segment into many LineStrings). Keep the groups in file order.
-     *   2. For each group, put its points in west-to-east order (mileposts increase going
-     *      east): turn any piece whose first longitude is east of its last around, sort the
-     *      pieces by their first longitude, then join them into one list of {lon, lat}.
-     *   3. Walk the list adding GeoHash.haversineMiles between neighbors, so distance[i] is
-     *      the miles from the first point to point i (measured across ALL pieces).
-     *   4. channel = HiChan.computeChannelNumber(ENDMP). For each multiple of 10 (B)
-     *      strictly between BEGMP and ENDMP, find the point whose distance is closest to
-     *      (B - BEGMP): points up to and including it get channel B, later points move on
-     *      to the next mark. Example: BEGMP 9.0, ENDMP 15.0 splits at the point closest to
-     *      1 mile; points up to it are channel 10, the rest are channel 20.
-     *   5. rows.add(new HighwaySegment(null, route, stfips, begMp, endMp, lat, lon, channel))
-     *      for every point, in that west-to-east order. Note lat = point[1], lon = point[0].
-     */
+
     public static List<HighwaySegment> splitAtChannelBoundaries(List<RoadFeature> features) {
-        // TODO: one row per point with its 10-mile channel
-        return new ArrayList<>();
+
+
+        List<HighwaySegment> rows = new ArrayList<>(); // new rows list
+
+        // LinkedHashMap keeps the groups in file order
+        // groups the pieces of each NHPN segment
+        Map<String, List<RoadFeature>> groups = new LinkedHashMap<>();// creating a new group
+
+        for (RoadFeature f : features) { // for each road feature
+            String key = f.route + "|" + f.stfips + "|" + f.begMp + "|" + f.endMp; // string together the features
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(f); // add to f
+        } // end of for
+
+        for (List<RoadFeature> group : groups.values()) { // for each group
+            RoadFeature first = group.get(0); // every piece shares route, state and mileposts
+
+            // turn each piece west to east, sort the pieces west to east, then join them
+            List<List<double[]>> pieces = new ArrayList<>(); // new pieces list
+
+            for (RoadFeature f : group) { // for each group of roadfeatures
+                if (f.coordinates.isEmpty())
+                    continue; // nothing to add from an empty piece
+
+                List<double[]> piece = new ArrayList<>(f.coordinates); // new piece of cordinates
+
+                if (piece.get(0)[0] > piece.get(piece.size() - 1)[0]) // first lon east of last lon
+                    Collections.reverse(piece);
+                pieces.add(piece); //add them all at the end
+            } // end of for
+
+            pieces.sort(Comparator.comparingDouble(piece -> piece.get(0)[0])); // westernmost piece first
+
+            List<double[]> points = new ArrayList<>(); // new points list
+
+            for (List<double[]> piece : pieces) // for each piece
+                points.addAll(piece); // add them
+
+            if (points.isEmpty()) // if its empty then skip
+                continue; // group had no coordinates at all
+
+            // miles from the first point to each point across all the pieces
+            double[] distance = new double[points.size()]; // distnace in points
+
+            for (int i = 1; i < points.size(); i++) { // for each point
+                double[] a = points.get(i - 1);
+                double[] b = points.get(i);
+                // points are {lon, lat}, haversineMiles wants (lat, lon, lat, lon)
+                distance[i] = distance[i - 1] + GeoHash.haversineMiles(a[1], a[0], b[1], b[0]);
+            } // end of for
+
+            // every 10-mile mark strictly between BEGMP and ENDMP, and the point closest to it
+            int step = HiChanConfig.CHANNEL_MILES;
+            List<Integer> marks = new ArrayList<>(); // new marks list
+            List<Integer> splitAt = new ArrayList<>(); // index of the last point in each mark's channel
+            // love mark
+
+            for (int mark = ((int) Math.floor(first.begMp / step) + 1) * step; mark < first.endMp; mark += step) {
+                double target = mark - first.begMp; // miles from the first point to this mark
+
+                int best = 0;
+                for (int i = 1; i < distance.length; i++) { // for each distance
+                    if (Math.abs(distance[i] - target) < Math.abs(distance[best] - target))
+                        best = i;
+                } // end of for
+
+                // a later mark can never split before an earlier one
+                if (!splitAt.isEmpty() && best < splitAt.get(splitAt.size() - 1))
+                    best = splitAt.get(splitAt.size() - 1);
+
+                marks.add(mark);
+                splitAt.add(best);
+                // gotta love mark
+            } // end of for
+
+            // points past the last split get the channel at or above ENDMP
+            int lastChannel = HiChan.computeChannelNumber(first.endMp);
+
+            // one row per point, west to east, geohash left null for computeGeohashes
+            for (int i = 0; i < points.size(); i++) {
+                int channel = lastChannel;
+
+                for (int m = 0; m < marks.size(); m++) {
+                    if (i <= splitAt.get(m)) { // up to and including the split point
+                        channel = marks.get(m);
+                        break;
+                    } // end of if
+                } // end of for
+
+                double[] p = points.get(i);
+                rows.add(new HighwaySegment(null, first.route, first.stfips, first.begMp, first.endMp,
+                        p[1], p[0], channel)); // lat = p[1], lon = p[0]
+            } // end of for
+        } // end of for
+
+        return rows; // yipee
     } // end of splitAtChannelBoundaries
 
     // Geohash Indexer: sets each row's geohash from its own LAT and LON (latitude first)
@@ -333,12 +403,12 @@ public class Preprocessor {
 
     } // end of computeGeohashes
 
-    // Lookup File Writer: returns the rows sorted by geohash (FR-04)
+    // returns the rows sorted by geohash (FR-04)
     public static List<HighwaySegment> buildSegments(List<HighwaySegment> rows) {
         List<HighwaySegment> sorted = new ArrayList<>(rows);
 
         sorted.sort(Comparator.comparing(HighwaySegment::getGeohash).thenComparingDouble(HighwaySegment::getBegMp));
-        //Comparator that sorts alphabetically by geohash string using method reference, then when two rows have same geohash, the smaller BegMP goes first.
+        // comparator that sorts alphabetically by geohash string using method reference, then when two rows have same geohash, the smaller BegMP goes first.
 
         return sorted;
     } // end of buildSegments
@@ -357,10 +427,10 @@ public class Preprocessor {
         } // end of try
     } // end of writeCsv
 
-    // Finds the value for a key in a chunk, returns null if the key (or its value) isn't there
+    // finds the value for a key in a chunk, returns null if the key isn't there
     public static String getValue(String chunk, String key){
 
-        // Where the key is and the colon right after it
+        // where the key is and the colon right after it
         int keyPos = chunk.indexOf("\"" + key + "\"");
 
         // key isn't in this chunk so there is nothing to read
@@ -373,7 +443,7 @@ public class Preprocessor {
         if (colon == -1)
             return null;
 
-        // The value ends at the next comma, closing brace or the end of the line (ENDMP has no comma)
+        // the value ends at the next comma, closing brace or the end of the line
         int comma = chunk.indexOf(",", colon);
         int brace = chunk.indexOf("}", colon);
         int newline = chunk.indexOf("\n", colon);
@@ -394,7 +464,7 @@ public class Preprocessor {
         if (end == -1)
             end = chunk.length();
 
-        // Cuts it out strip spaces/\r and remove quotes
+        // cuts it out strip spaces/\r and remove quotes
         String value = chunk.substring(colon + 1, end).trim().replace("\"", "");
 
         // an empty or null value counts as missing
