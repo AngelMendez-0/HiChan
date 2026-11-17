@@ -4,6 +4,8 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.NoSuchFileException;
 import java.util.*;
@@ -104,6 +106,20 @@ public class Preprocessor {
     // Any problem prints one line, ERROR:<file>:<reason>, and exits with status 1 (NFR-U1, NFR-U2)
     public static void main(String[] args) {
         if(args.length == 2) {
+            try {
+                Path input = Paths.get(args[0]).toAbsolutePath().normalize();
+                Path output = Paths.get(args[1]).toAbsolutePath().normalize();
+                if (input.equals(output) || (Files.exists(input) && Files.exists(output) && Files.isSameFile(input, output))) {
+                    System.err.println("ERROR:" + args[1] + ":output file is an input file");
+                    System.exit(1);
+                    return;
+                }
+            } catch (IOException | InvalidPathException e) {
+                System.err.println("ERROR:" + args[1] + ":cannot write file");
+                System.exit(1);
+                return;
+            }
+
             // Get JSON
             String json;
             try {
@@ -112,7 +128,7 @@ public class Preprocessor {
                 System.err.println("ERROR:" + args[0] + ":file not found");
                 System.exit(1);
                 return;
-            } catch (IOException e) {
+            } catch (IOException | InvalidPathException e) {
                 System.err.println("ERROR:" + args[0] + ":file not readable");
                 System.exit(1);
                 return;
@@ -135,6 +151,12 @@ public class Preprocessor {
                 return;
             } // end of try catch
 
+            if (features.isEmpty()) {
+                System.err.println("ERROR:" + args[0] + ":no road features found");
+                System.exit(1);
+                return;
+            }
+
             // Filter, split at 10-mile marks, geohash, sort
             List<RoadFeature> kept = filterSegments(features);
             List<HighwaySegment> rows = splitAtChannelBoundaries(kept);
@@ -144,7 +166,7 @@ public class Preprocessor {
             // Output
             try {
                 writeCsv(rows, args[1]);
-            } catch (IOException e) {
+            } catch (IOException | InvalidPathException e) {
                 System.err.println("ERROR:" + args[1] + ":cannot write file");
                 System.exit(1);
                 return;
@@ -423,6 +445,9 @@ public class Preprocessor {
             // appends to rows from toCsvLine
             for(HighwaySegment row : rows)
                 pw.println(row.toCsvLine());
+
+            if (pw.checkError())
+                throw new IOException("cannot write file");
 
         } // end of try
     } // end of writeCsv
