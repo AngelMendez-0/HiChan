@@ -73,9 +73,9 @@ public class HighwaySegment {
     // converts the FIPS to a 2 letter state
     // (.equals compares the text, == would only compare object references)
     public String getStateAbbrev() {
-        if("53".equals(stfips))
+        if(HiChanConfig.STATE_WA.equals(stfips))
             return "WA";
-        else if("16".equals(stfips))
+        else if(HiChanConfig.STATE_ID.equals(stfips))
             return "ID";
         else
             return "??";
